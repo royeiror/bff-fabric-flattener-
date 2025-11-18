@@ -1,0 +1,139 @@
+name: Build Windows Release
+
+on:
+  push:
+    branches: [ main, master ]
+    tags:
+      - 'v*'
+  pull_request:
+    branches: [ main, master ]
+  workflow_dispatch:
+
+jobs:
+  build-bff:
+    name: Build BFF Command-Line
+    runs-on: windows-latest
+    
+    steps:
+    - name: Checkout BFF Repository
+      uses: actions/checkout@v4
+      with:
+        repository: GeometryCollective/boundary-first-flattening
+        submodules: recursive
+        path: bff-source
+    
+    - name: Setup MSVC
+      uses: microsoft/setup-msbuild@v1.1
+    
+    - name: Install vcpkg dependencies
+      run: |
+        cd bff-source
+        vcpkg install suitesparse:x64-windows
+    
+    - name: Configure CMake
+      run: |
+        cd bff-source
+        mkdir build
+        cd build
+        cmake .. -G "Visual Studio 17 2022" -A x64 `
+          -DCMAKE_TOOLCHAIN_FILE="C:/vcpkg/scripts/buildsystems/vcpkg.cmake" `
+          -DBUILD_GUI=OFF
+    
+    - name: Build BFF
+      run: |
+        cd bff-source/build
+        cmake --build . --config Release --target bff-command-line
+    
+    - name: Upload BFF Artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: bff-executable
+        path: bff-source/build/Release/bff-command-line.exe
+        retention-days: 5
+
+  build-gui:
+    name: Build GUI Application
+    needs: build-bff
+    runs-on: windows-latest
+    
+    steps:
+    - name: Checkout Repository
+      uses: actions/checkout@v4
+    
+    - name: Setup Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.11'
+        cache: 'pip'
+    
+    - name: Install Dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install pyqt6 pyinstaller
+    
+    - name: Download BFF Executable
+      uses: actions/download-artifact@v4
+      with:
+        name: bff-executable
+        path: bff/
+    
+    - name: Build Executable with PyInstaller
+      run: |
+        pyinstaller --name "BFF-Fabric-Flattener" `
+          --windowed `
+          --onefile `
+          --icon=icon.ico `
+          --add-data "bff;bff" `
+          main.py
+    
+    - name: Create Release Archive
+      run: |
+        mkdir release
+        Copy-Item dist/BFF-Fabric-Flattener.exe release/
+        Copy-Item README.md release/ -ErrorAction SilentlyContinue
+        Copy-Item LICENSE release/ -ErrorAction SilentlyContinue
+        Compress-Archive -Path release/* -DestinationPath BFF-Fabric-Flattener-Windows.zip
+    
+    - name: Upload Release Artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: windows-release
+        path: BFF-Fabric-Flattener-Windows.zip
+        retention-days: 30
+    
+    - name: Create GitHub Release
+      if: startsWith(github.ref, 'refs/tags/v')
+      uses: softprops/action-gh-release@v1
+      with:
+        files: BFF-Fabric-Flattener-Windows.zip
+        draft: false
+        prerelease: false
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  test:
+    name: Test Application
+    needs: build-gui
+    runs-on: windows-latest
+    
+    steps:
+    - name: Checkout Repository
+      uses: actions/checkout@v4
+    
+    - name: Download Release
+      uses: actions/download-artifact@v4
+      with:
+        name: windows-release
+    
+    - name: Extract Release
+      run: |
+        Expand-Archive BFF-Fabric-Flattener-Windows.zip -DestinationPath test-dir
+    
+    - name: Verify Executable
+      run: |
+        if (Test-Path "test-dir/BFF-Fabric-Flattener.exe") {
+          Write-Host "Executable found and built successfully!"
+        } else {
+          Write-Error "Executable not found!"
+          exit 1
+        }
